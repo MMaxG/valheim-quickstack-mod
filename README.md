@@ -1,4 +1,3 @@
-[README(2).md](https://github.com/user-attachments/files/32125748/README.2.md)
 # QuickStack
 
 A BepInEx mod for Valheim that quick-stacks matching items from your inventory into nearby containers, with slot/item favoriting to protect items you don't want moved.
