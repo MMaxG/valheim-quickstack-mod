@@ -443,9 +443,11 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		{
 			Logger.LogInfo($"No containers found within {quickStackRange.Value:F1}m.");
 		}
-		else
+		else if (movedItemCount > 0)
 		{
-			Logger.LogInfo($"QuickStack moved {movedItemCount} item(s).");
+			MessageHud.instance.ShowMessage(
+				MessageHud.MessageType.Center,
+				$"Stacked {movedItemCount} items");
 		}
 	}
 
@@ -632,5 +634,51 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		{
 			loadedContainers.Remove(__instance);
 		}
+	}
+
+	// Stop Valheim from picking up or moving an item during Alt-left-click.
+	[HarmonyPatch(typeof(InventoryGrid), "OnLeftClick")]
+	private static class InventoryLeftClickPatch
+	{
+		private static bool Prefix()
+		{
+			return !IsAltHeld();
+		}
+	}
+
+	// Valheim completes some item pickup operations when the mouse button releases.
+	[HarmonyPatch(typeof(InventoryGrid), "OnLeftRelease")]
+	private static class InventoryLeftReleasePatch
+	{
+		private static bool Prefix()
+		{
+			return !IsAltHeld();
+		}
+	}
+
+	// Valheim starts inventory pickup through InventoryGui.OnSelectedItem.
+	[HarmonyPatch(typeof(InventoryGui), "OnSelectedItem")]
+	private static class InventorySelectedItemPatch
+	{
+		private static bool Prefix()
+		{
+			return !IsAltHeld();
+		}
+	}
+
+	// Stop Valheim from using or consuming an item during Alt-right-click.
+	[HarmonyPatch(typeof(InventoryGui), "OnRightClickItem")]
+	private static class InventoryRightClickPatch
+	{
+		private static bool Prefix()
+		{
+			return !IsAltHeld();
+		}
+	}
+
+	// This method centralizes modifier detection for click suppression patches.
+	private static bool IsAltHeld()
+	{
+		return Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
 	}
 }
