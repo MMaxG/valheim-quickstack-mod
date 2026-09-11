@@ -36,6 +36,7 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 	// These settings protect commonly used player items from automatic transfer.
 	private ConfigEntry<bool> skipEquippedItems = null!;
 	private ConfigEntry<bool> skipHotbarItems = null!;
+	private ConfigEntry<bool> skipShipContainers = null!;
 
 	// Awake runs once when BepInEx creates the plugin.
 	// Use it for setup that should happen one time.
@@ -67,6 +68,12 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 			"Skip hotbar items",
 			true,
 			"Do not move items assigned to the hotbar.");
+
+		skipShipContainers = Config.Bind(
+			"General",
+			"Skip ship containers",
+			true,
+			"Do not move items into ship containers. Recommended for multiplayer safety.");
 
 		// Store favorite coordinates as text because BepInEx config has no Vector2i type.
 		favoriteSlotConfig = Config.Bind(
@@ -284,18 +291,18 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		}
 	}
 
-		// This method restores identity favorites from BepInEx config.
-		private void LoadFavoriteItems()
+	// This method restores identity favorites from BepInEx config.
+	private void LoadFavoriteItems()
+	{
+		favoriteItemIdentities.Clear();
+		foreach (string identity in favoriteItemConfig.Value.Split(';'))
 		{
-			favoriteItemIdentities.Clear();
-			foreach (string identity in favoriteItemConfig.Value.Split(';'))
+			if (!string.IsNullOrWhiteSpace(identity))
 			{
-				if (!string.IsNullOrWhiteSpace(identity))
-				{
-					favoriteItemIdentities.Add(identity);
-				}
+				favoriteItemIdentities.Add(identity);
 			}
 		}
+	}
 
 	// This method writes favorite slot positions immediately after each toggle.
 	private void SaveFavoriteSlots()
@@ -431,7 +438,9 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 			}
 
 			float distance = Vector3.Distance(playerPosition, container.transform.position);
-			if (distance <= quickStackRange.Value)
+			if (distance <= quickStackRange.Value &&
+				(!skipShipContainers.Value || !IsShipContainer(container)) &&
+				!container.IsInUse())
 			{
 				nearbyContainerCount++;
 				movedItemCount += MoveMatchingItems(container, playerInventory, playerItems);
@@ -486,6 +495,13 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 			return 0;
 		}
 
+		// Container state can change after the nearby-container scan.
+		// Recheck both multiplayer safety conditions immediately before transfer.
+		if ((skipShipContainers.Value && IsShipContainer(container)) || container.IsInUse())
+		{
+			return 0;
+		}
+
 		int movedItemCount = 0;
 		List<ItemDrop.ItemData> equippedItems = playerInventory.GetEquippedItems();
 		HashSet<ItemDrop.ItemData> hotbarItems = new HashSet<ItemDrop.ItemData>(
@@ -497,6 +513,12 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		// Check each player item against the chest before changing either inventory.
 		foreach (ItemDrop.ItemData playerItem in itemsToMove)
 		{
+			// Another player may open container while this loop is running.
+			if ((skipShipContainers.Value && IsShipContainer(container)) || container.IsInUse())
+			{
+				break;
+			}
+
 			if (playerItem.m_stack <= 0)
 			{
 				continue;
@@ -614,6 +636,14 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 
 		availableSpace += inventory.GetEmptySlots() * playerItem.m_shared.m_maxStackSize;
 		return availableSpace;
+	}
+
+	// Ship cargo is a Container component that lives as a child of the Ship object,
+	// not a Container subtype — "container is Ship" is always false and never
+	// excludes anything. Walk up the hierarchy instead.
+	private static bool IsShipContainer(Container container)
+	{
+		return container.GetComponentInParent<Ship>() != null;
 	}
 
 	// Add container to cache after Valheim finishes constructing it.
