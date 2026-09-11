@@ -85,8 +85,4 @@ Slot favoriting (Alt+Right-click):
 
 ## Contributing
 
-Issues and PRs welcome. Please include repro steps for any multiplayer-related bug reports (host/client, item type, container type) where possible — these are the hardest to track down without a dedicated test setup.
-
-## License
-
-*(add your license here)*
+Feel free to fork, copy, or reuse any part of this code for your own projects — no need to ask. This is a hobby project maintained in my spare time, so don't expect fixes or feature requests to be picked up on any timeline; PRs are welcome if you want something changed yourself.
