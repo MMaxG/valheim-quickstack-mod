@@ -8,12 +8,14 @@ using UnityEngine.UI;
 
 // This plugin is the entry point for QuickStack.
 // BepInEx creates this class when Valheim loads the mod.
-[BepInPlugin("quickstack", "QuickStack", "0.1.0")]
+[BepInPlugin("quickstack", "QuickStack", "1.2.1")]
 public sealed class QuickStackPlugin : BaseUnityPlugin
 {
 	// This cache stores containers currently loaded by this game client.
 	// A HashSet prevents duplicate entries and supports fast removal.
 	private static readonly HashSet<Container> loadedContainers = new HashSet<Container>();
+	private static readonly MethodInfo containerSaveMethod =
+	AccessTools.Method(typeof(Container), "Save");
 
 	// This prototype stores favorite inventory slots by grid position.
 	private readonly HashSet<Vector2i> favoriteSlots = new HashSet<Vector2i>();
@@ -37,6 +39,7 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 	private ConfigEntry<bool> skipEquippedItems = null!;
 	private ConfigEntry<bool> skipHotbarItems = null!;
 	private ConfigEntry<bool> skipShipContainers = null!;
+	private static Container? openedContainer;
 
 	// Awake runs once when BepInEx creates the plugin.
 	// Use it for setup that should happen one time.
@@ -324,6 +327,11 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		Config.Save();
 	}
 
+	private static void SaveContainer(Container container)
+	{
+		containerSaveMethod.Invoke(container, null);
+	}
+
 	// This method creates four thin UI images instead of covering the item with a solid color.
 	private void AddFavoriteBorder(InventoryElement element, bool identityMode = false)
 	{
@@ -440,7 +448,7 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 			float distance = Vector3.Distance(playerPosition, container.transform.position);
 			if (distance <= quickStackRange.Value &&
 				(!skipShipContainers.Value || !IsShipContainer(container)) &&
-				!container.IsInUse())
+				(!container.IsInUse() || IsOpenedByLocalPlayer(container)))
 			{
 				nearbyContainerCount++;
 				movedItemCount += MoveMatchingItems(container, playerInventory, playerItems);
@@ -497,7 +505,7 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 
 		// Container state can change after the nearby-container scan.
 		// Recheck both multiplayer safety conditions immediately before transfer.
-		if ((skipShipContainers.Value && IsShipContainer(container)) || container.IsInUse())
+		if ((skipShipContainers.Value && IsShipContainer(container)) || (container.IsInUse() && !IsOpenedByLocalPlayer(container)))
 		{
 			return 0;
 		}
@@ -514,7 +522,7 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		foreach (ItemDrop.ItemData playerItem in itemsToMove)
 		{
 			// Another player may open container while this loop is running.
-			if ((skipShipContainers.Value && IsShipContainer(container)) || container.IsInUse())
+			if ((skipShipContainers.Value && IsShipContainer(container)) || (container.IsInUse() && !IsOpenedByLocalPlayer(container)))
 			{
 				break;
 			}
@@ -549,54 +557,51 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 			// FindFreeStackSpace returns zero both when no matching item exists and
 			// when a matching item exists but has no available stack space.
 			// Check for the matching item first so the log explains the real problem.
-			ItemDrop.ItemData? matchingContainerItem = null;
-			List<ItemDrop.ItemData> containerItems = inventory.GetAllItems();
-			foreach (ItemDrop.ItemData containerItem in containerItems)
+			// Skip items with no matching stack in this chest at all — QuickStack only tops off existing types.
+			bool hasMatch = false;
+			foreach (ItemDrop.ItemData containerItem in inventory.GetAllItems())
 			{
 				if (containerItem.m_shared.m_name == playerItem.m_shared.m_name)
 				{
-					matchingContainerItem = containerItem;
+					hasMatch = true;
 					break;
 				}
 			}
-
-			if (matchingContainerItem == null)
+			if (!hasMatch)
 			{
 				continue;
 			}
 
-			// Calculate capacity directly because FindFreeStackSpace can report zero
-			// for an item that has no matching stack, not only for a full chest.
-			int availableSpace = GetAvailableSpace(inventory, playerItem);
-			int amountToMove = availableSpace;
-			amountToMove = Mathf.Min(amountToMove, playerItem.m_stack);
-			if (amountToMove <= 0)
+			int remaining = playerItem.m_stack;
+
+			// Fill every existing partial stack of this item first, each up to its own remaining room.
+			foreach (ItemDrop.ItemData containerItem in new List<ItemDrop.ItemData>(inventory.GetAllItems()))
 			{
-				continue;
+				if (remaining <= 0) break;
+				if (containerItem.m_shared.m_name != playerItem.m_shared.m_name) continue;
+
+				int room = containerItem.m_shared.m_maxStackSize - containerItem.m_stack;
+				if (room <= 0) continue;
+
+				int amount = Mathf.Min(room, remaining);
+				inventory.MoveItemToThis(playerInventory, playerItem, amount, containerItem.m_gridPos.x, containerItem.m_gridPos.y);
+				remaining -= amount;
+				movedItemCount += amount;
 			}
 
-			string itemName = playerItem.m_shared.m_name;
-			// Valheim's transfer method updates source and destination inventories together.
-			if (amountToMove == playerItem.m_stack)
+			// Then spill any leftover into empty slots, since this item type already exists in the chest.
+			while (remaining > 0 && TryFindEmptySlot(inventory, out Vector2i emptySlot))
 			{
-				// Full-stack overload chooses a valid destination slot internally.
-				inventory.MoveItemToThis(playerInventory, playerItem);
+				int amount = Mathf.Min(playerItem.m_shared.m_maxStackSize, remaining);
+				inventory.MoveItemToThis(playerInventory, playerItem, amount, emptySlot.x, emptySlot.y);
+				remaining -= amount;
+				movedItemCount += amount;
 			}
-			else
-			{
-				// Partial overload needs an actual destination grid position.
-				Vector2i destination = matchingContainerItem.m_gridPos;
-				if (matchingContainerItem.m_stack >= matchingContainerItem.m_shared.m_maxStackSize)
-				{
-					if (!TryFindEmptySlot(inventory, out destination))
-					{
-						continue;
-					}
-				}
+		}
 
-				inventory.MoveItemToThis(playerInventory, playerItem, amountToMove, destination.x, destination.y);
-			}
-			movedItemCount += amountToMove;
+		if (movedItemCount > 0)
+		{
+			SaveContainer(container);
 		}
 
 		return movedItemCount;
@@ -704,6 +709,29 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		{
 			return !IsAltHeld();
 		}
+	}
+
+	[HarmonyPatch(typeof(InventoryGui), "Show")]
+	private static class InventoryGuiShowPatch
+	{
+		private static void Postfix(Container container)
+		{
+			openedContainer = container;
+		}
+	}
+
+	[HarmonyPatch(typeof(InventoryGui), "Hide")]
+	private static class InventoryGuiHidePatch
+	{
+		private static void Postfix()
+		{
+			openedContainer = null;
+		}
+	}
+
+	private static bool IsOpenedByLocalPlayer(Container container)
+	{
+		return container == openedContainer;
 	}
 
 	// This method centralizes modifier detection for click suppression patches.
