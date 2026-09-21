@@ -11,6 +11,13 @@
     <PackageReference Include="BepInEx.PluginInfoProps" Version="2.1.0" />
   </ItemGroup>
 
+
+  <Target Name="CopyToPlugins" AfterTargets="Build"
+        Condition="Exists('$(ValheimPath)\BepInEx\plugins')">
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(ValheimPath)\BepInEx\plugins" />
+  </Target>
+
   <ItemGroup>
     <Reference Include="UnityEngine">
       <HintPath>$(ValheimPath)\valheim_Data\Managed\UnityEngine.dll</HintPath>

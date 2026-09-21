@@ -8,7 +8,7 @@ using UnityEngine.UI;
 
 // This plugin is the entry point for QuickStack.
 // BepInEx creates this class when Valheim loads the mod.
-[BepInPlugin("quickstack", "QuickStack", "1.2.1")]
+[BepInPlugin("quickstack", "QuickStack", "1.3.0")]
 public sealed class QuickStackPlugin : BaseUnityPlugin
 {
 	// This cache stores containers currently loaded by this game client.
@@ -29,8 +29,31 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 	// This config entry stores favorite item identities across game restarts.
 	private ConfigEntry<string> favoriteItemConfig = null!;
 
+	// These settings control the border colors of favorites (RGBA).
+	// The defaults match the colors used before these settings existed.
+	private static readonly Color DefaultSlotFavoriteColor = new Color32(226, 169, 101, 179);
+	private static readonly Color DefaultItemFavoriteColor = new Color32(28, 146, 216, 179);
+	private ConfigEntry<Color> slotFavoriteColor = null!;
+	private ConfigEntry<Color> itemFavoriteColor = null!;
+
 	// This setting lets players change the hotkey without rebuilding the mod.
 	private ConfigEntry<KeyboardShortcut> quickStackHotkey = null!;
+
+	// These settings add a controller shortcut: hold the modifier, press the button.
+	private ConfigEntry<string> quickStackGamepadModifier = null!;
+	private ConfigEntry<string> quickStackGamepadButton = null!;
+	private GamepadCombo? gamepadCombo;
+
+	// These settings choose the favorite shortcuts. The keyboard shortcut may use a mouse
+	// button as its main key (Mouse0 = left click, Mouse1 = right click).
+	// They are static because the click-suppression patches read them.
+	private static ConfigEntry<KeyboardShortcut> favoriteItemHotkey = null!;
+	private static ConfigEntry<KeyboardShortcut> favoriteSlotHotkey = null!;
+	private GamepadCombo? favoriteItemGamepadCombo;
+	private GamepadCombo? favoriteSlotGamepadCombo;
+	private static float lastFavoriteItemKeyTime = -10f;
+	private static float lastFavoriteSlotKeyTime = -10f;
+	private bool warnedNoGamepadSelection;
 
 	// This setting controls how far QuickStack searches for containers.
 	private ConfigEntry<float> quickStackRange = null!;
@@ -45,13 +68,40 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 	// Use it for setup that should happen one time.
 	private void Awake()
 	{
+		KeyboardHotkey.Log = Logger;
+
 		// Store the hotkey in BepInEx configuration.
-		// F8 becomes the default only when no saved setting exists yet.
+		// Backquote becomes the default only when no saved setting exists yet.
+		// A combo works too: hold the modifier key(s), then press the main key.
 		quickStackHotkey = Config.Bind(
 			"General",
 			"Quick stack hotkey",
 			new KeyboardShortcut(KeyCode.BackQuote),
-			"Press this key to quick-stack items.");
+			"Keyboard shortcut that quick-stacks items. Supports a two-key combo: " +
+			"the last key is pressed while the other key is held " +
+			"(for example LeftControl + Q). A single key also works.");
+
+		// Controller shortcut: hold the modifier button, then press the button.
+		quickStackGamepadModifier = Config.Bind(
+			"General",
+			"Quick stack gamepad modifier",
+			"BumperL",
+			"Gamepad button that must be held for the quick stack shortcut " +
+			"(BumperL = LB). Set to None to use a single button. Valid values: " +
+			GamepadCombo.ValidNames);
+
+		quickStackGamepadButton = Config.Bind(
+			"General",
+			"Quick stack gamepad button",
+			"StickR",
+			"Gamepad button that quick-stacks items. Set to None to disable the " +
+			"gamepad shortcut. Valid values: " +
+			GamepadCombo.ValidNames);
+
+		gamepadCombo = new GamepadCombo(
+			quickStackGamepadModifier,
+			quickStackGamepadButton,
+			Logger);
 
 		// Store range in config so players can tune it without rebuilding the mod.
 		quickStackRange = Config.Bind(
@@ -89,6 +139,73 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 			"Items",
 			string.Empty,
 			"Favorite item identities, separated by semicolons.");
+
+		// Favorite shortcuts. Defaults: Alt + left-click favorites the slot,
+		// Alt + right-click favorites the item type.
+		favoriteItemHotkey = Config.Bind(
+			"Favorites",
+			"Favorite item hotkey",
+			new KeyboardShortcut(KeyCode.Mouse1, KeyCode.LeftAlt),
+			"Hover an inventory slot and press this to favorite the item there (protects that " +
+			"item type). Format: modifier + main key, for example LeftAlt + Mouse1 (right click) " +
+			"or LeftControl + F. Mouse buttons are Mouse0 to Mouse6. Keep a modifier on mouse " +
+			"shortcuts, otherwise the normal click stops working. Left and right Alt, Shift and " +
+			"Ctrl are treated the same.");
+
+		favoriteSlotHotkey = Config.Bind(
+			"Favorites",
+			"Favorite slot hotkey",
+			new KeyboardShortcut(KeyCode.Mouse0, KeyCode.LeftAlt),
+			"Hover an inventory slot and press this to favorite the slot itself, whatever item " +
+			"is in it. Same format as the item hotkey, for example LeftAlt + Mouse0 (left click).");
+
+		ConfigEntry<string> favoriteItemPadModifier = Config.Bind(
+			"Favorites",
+			"Favorite item gamepad modifier",
+			"TriggerL",
+			"Gamepad button that must be held for the favorite item shortcut. " +
+			"Set to None to use a single button. Valid values: " +
+			GamepadCombo.ValidNames);
+
+		ConfigEntry<string> favoriteItemPadButton = Config.Bind(
+			"Favorites",
+			"Favorite item gamepad button",
+			"StickR",
+			"Gamepad button that favorites the item under the gamepad selection " +
+			"(inventory must be open). Set to None to disable. Valid values: " +
+			GamepadCombo.ValidNames);
+
+		ConfigEntry<string> favoriteSlotPadModifier = Config.Bind(
+			"Favorites",
+			"Favorite slot gamepad modifier",
+			"TriggerL",
+			"Gamepad button that must be held for the favorite slot shortcut. " +
+			"Set to None to use a single button. Valid values: " +
+			GamepadCombo.ValidNames);
+
+		ConfigEntry<string> favoriteSlotPadButton = Config.Bind(
+			"Favorites",
+			"Favorite slot gamepad button",
+			"StickL",
+			"Gamepad button that favorites the slot under the gamepad selection " +
+			"(inventory must be open). Set to None to disable. Valid values: " +
+			GamepadCombo.ValidNames);
+
+		favoriteItemGamepadCombo = new GamepadCombo(favoriteItemPadModifier, favoriteItemPadButton, Logger);
+		favoriteSlotGamepadCombo = new GamepadCombo(favoriteSlotPadModifier, favoriteSlotPadButton, Logger);
+
+		// Colors are stored as RGBA hex (for example E2A965B3).
+		// The last two digits are the transparency.
+		slotFavoriteColor = Config.Bind(
+			"Favorites",
+			"Slot color",
+			DefaultSlotFavoriteColor,
+			"Border color of favorite slots, as RGBA hex.");
+		itemFavoriteColor = Config.Bind(
+			"Favorites",
+			"Item color",
+			DefaultItemFavoriteColor,
+			"Border color of favorite items, as RGBA hex.");
 		LoadFavoriteSlots();
 		LoadFavoriteItems();
 
@@ -98,29 +215,33 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		Config.Save();
 
 		// This confirms that BepInEx loaded the plugin successfully.
-		Logger.LogInfo("QuickStack loaded. Press backtick to quick-stack.");
+		Logger.LogInfo(
+			$"QuickStack loaded. Keyboard: {quickStackHotkey.Value}. " +
+			$"Gamepad: {quickStackGamepadModifier.Value} + {quickStackGamepadButton.Value}.");
 	}
 
 	// Update runs once every rendered frame while the game is running.
 	// Keep this check small because it runs many times per second.
 	private void Update()
 	{
-		// IsDown returns true only on the frame when the player presses the key.
-		if (quickStackHotkey.Value.IsDown())
+		// Do not react while the player types (chat, console, sign text, map pin name).
+		if (!IsTextInputActive())
 		{
-			// Keep input detection separate from inventory behavior.
-			RunQuickStack();
-		}
+			// Every source is evaluated each frame so keyboard and gamepad can be
+			// swapped freely. The keyboard is read through legacy input and through
+			// the Input System, in case the game suppresses one of them while a
+			// gamepad is active. The non-short-circuit | keeps all sources polled.
+			bool quickStackPressed =
+				IsShortcutDown(quickStackHotkey.Value) |
+				(gamepadCombo != null && gamepadCombo.WasPressed());
 
-		// Mouse input needs direct Unity checks; KeyboardShortcut handles keyboard keys only.
-		if ((Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt)) && Input.GetMouseButtonDown(0))
-		{
-			HandleFavoriteClick(false);
-		}
+			if (Debounce(ref lastQuickStackTime, quickStackPressed))
+			{
+				// Keep input detection separate from inventory behavior.
+				RunQuickStack();
+			}
 
-		if ((Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt)) && Input.GetMouseButtonDown(1))
-		{
-			HandleFavoriteClick(true);
+			HandleFavoriteHotkeys();
 		}
 
 		// Inventory UI can recreate slot elements after loading or refreshes.
@@ -128,49 +249,202 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		ApplyFavoriteBorders();
 	}
 
-	// This method toggles item or slot protection based on the Alt-click button used.
-	private void HandleFavoriteClick(bool slotMode)
+	// Returns true only on the frame when the main key is pressed while all modifiers are held.
+	// Keys are read through legacy input and the Input System (mouse buttons: legacy only).
+	private static bool IsShortcutDown(KeyboardShortcut shortcut)
 	{
-		if (InventoryGui.instance == null || InventoryGui.instance.m_playerGrid == null)
+		KeyCode main = shortcut.MainKey;
+		if (main == KeyCode.None) return false;
+
+		if (!Input.GetKeyDown(main) && !KeyboardHotkey.WasPressedThisFrame(main)) return false;
+
+		foreach (KeyCode modifier in shortcut.Modifiers)
 		{
-			Logger.LogInfo("Player inventory is not open.");
+			if (!IsModifierHeld(modifier)) return false;
+		}
+
+		return true;
+	}
+
+	// Left and right Alt, Shift and Ctrl count as the same modifier.
+	private static bool IsModifierHeld(KeyCode key)
+	{
+		KeyCode other = OtherSide(key);
+		return Input.GetKey(key) || Input.GetKey(other) ||
+			KeyboardHotkey.IsHeld(key) || KeyboardHotkey.IsHeld(other);
+	}
+
+	private static KeyCode OtherSide(KeyCode key)
+	{
+		switch (key)
+		{
+			case KeyCode.LeftAlt: return KeyCode.RightAlt;
+			case KeyCode.RightAlt: return KeyCode.LeftAlt;
+			case KeyCode.LeftShift: return KeyCode.RightShift;
+			case KeyCode.RightShift: return KeyCode.LeftShift;
+			case KeyCode.LeftControl: return KeyCode.RightControl;
+			case KeyCode.RightControl: return KeyCode.LeftControl;
+			default: return KeyCode.None;
+		}
+	}
+
+	private static bool IsMouseKey(KeyCode key)
+	{
+		return key >= KeyCode.Mouse0 && key <= KeyCode.Mouse6;
+	}
+
+	private static float lastQuickStackTime = -10f;
+
+	// The same key press can be reported by legacy input and by the Input System
+	// in slightly different frames. Ignore repeats within 0.25 s.
+	private static bool Debounce(ref float lastTime, bool pressed)
+	{
+		if (!pressed) return false;
+
+		float now = Time.unscaledTime;
+		if (now - lastTime < 0.25f) return false;
+
+		lastTime = now;
+		return true;
+	}
+
+	private static bool IsTextInputActive()
+	{
+		return (Chat.instance != null && Chat.instance.HasFocus()) ||
+			global::Console.IsVisible() ||
+			TextInput.IsVisible() ||
+			Minimap.InTextInput();
+	}
+
+	// This method checks both favorite shortcuts (keyboard/mouse and gamepad) each frame.
+	private void HandleFavoriteHotkeys()
+	{
+		CheckFavoriteInput(favoriteItemHotkey.Value, favoriteItemGamepadCombo, ref lastFavoriteItemKeyTime, false);
+		CheckFavoriteInput(favoriteSlotHotkey.Value, favoriteSlotGamepadCombo, ref lastFavoriteSlotKeyTime, true);
+	}
+
+	private void CheckFavoriteInput(
+		KeyboardShortcut shortcut,
+		GamepadCombo? combo,
+		ref float lastKeyTime,
+		bool slotMode)
+	{
+		// Mouse buttons come from one source only, so they need no debounce.
+		bool keyboardPressed = IsMouseKey(shortcut.MainKey)
+			? IsShortcutDown(shortcut)
+			: Debounce(ref lastKeyTime, IsShortcutDown(shortcut));
+		bool gamepadPressed = combo != null && combo.WasPressed();
+
+		if (gamepadPressed)
+		{
+			HandleFavoriteToggle(slotMode, true);
+		}
+		else if (keyboardPressed)
+		{
+			HandleFavoriteToggle(slotMode, false);
+		}
+	}
+
+	// This method toggles item or slot protection for the slot under the mouse cursor,
+	// or under the gamepad selection when the shortcut came from the controller.
+	private void HandleFavoriteToggle(bool slotMode, bool fromGamepad)
+	{
+		if (InventoryGui.instance == null ||
+			InventoryGui.instance.m_playerGrid == null ||
+			!InventoryGui.IsVisible())
+		{
+			// Gamepad buttons are used during normal play too, so stay quiet for them.
+			if (!fromGamepad)
+			{
+				Logger.LogInfo("Player inventory is not open.");
+			}
 			return;
 		}
 
-		// get_SelectionGridPosition reports gamepad selection, not mouse position.
-		// Check each visible inventory element against the current mouse position instead.
+		InventoryGrid grid = InventoryGui.instance.m_playerGrid;
+
+		Vector2i selected = new Vector2i(-1, -1);
+		if (fromGamepad && !TryGetGamepadSelection(grid, out selected))
+		{
+			return;
+		}
+
+		// Mouse mode checks each visible inventory element against the mouse position.
+		// Gamepad mode compares element positions with the gamepad selection instead.
 		FieldInfo elementsField = typeof(InventoryGrid).GetField(
 			"m_elements",
 			BindingFlags.Instance | BindingFlags.NonPublic)!;
 		PropertyInfo positionProperty = typeof(InventoryElement).GetProperty(
 			"Position",
 			BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
-		List<InventoryElement> elements = (List<InventoryElement>)elementsField.GetValue(
-			InventoryGui.instance.m_playerGrid)!;
+		List<InventoryElement> elements = (List<InventoryElement>)elementsField.GetValue(grid)!;
 
 		foreach (InventoryElement element in elements)
 		{
-			RectTransform elementRect = element.GetComponent<RectTransform>();
-			if (RectTransformUtility.RectangleContainsScreenPoint(
-				elementRect,
-				Input.mousePosition,
-				null))
+			Vector2i position = (Vector2i)positionProperty.GetValue(element, null)!;
+			bool hit = fromGamepad
+				? position.x == selected.x && position.y == selected.y
+				: RectTransformUtility.RectangleContainsScreenPoint(
+					element.GetComponent<RectTransform>(),
+					Input.mousePosition,
+					null);
+
+			if (!hit)
 			{
-				Vector2i position = (Vector2i)positionProperty.GetValue(element, null)!;
-				ItemDrop.ItemData item = GetPlayerItemAt(position);
-				if (slotMode)
-				{
-					ToggleFavoriteSlot(element, position);
-				}
-				else if (item != null)
-				{
-					ToggleFavoriteItem(element, item, position);
-				}
-				return;
+				continue;
 			}
+
+			ItemDrop.ItemData item = GetPlayerItemAt(position);
+			if (slotMode)
+			{
+				ToggleFavoriteSlot(element, position);
+			}
+			else if (item != null)
+			{
+				ToggleFavoriteItem(element, item, position);
+			}
+			return;
 		}
 
-		Logger.LogInfo("Mouse is not over a player inventory slot.");
+		Logger.LogInfo(fromGamepad
+			? "Gamepad selection is not on a player inventory slot."
+			: "Mouse is not over a player inventory slot.");
+	}
+
+	// This method reads which player-grid slot the gamepad has selected.
+	// The member names differ between Valheim versions, so try each known one.
+	private bool TryGetGamepadSelection(InventoryGrid grid, out Vector2i position)
+	{
+		position = new Vector2i(-1, -1);
+		BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+		// Ignore the stale selection when the gamepad is focused on another grid.
+		object? group = typeof(InventoryGrid).GetField("m_uiGroup", flags)?.GetValue(grid);
+		if (group != null &&
+			group.GetType().GetProperty("IsActive", flags)?.GetValue(group, null) is bool active &&
+			!active)
+		{
+			return false;
+		}
+
+		object? value =
+			typeof(InventoryGrid).GetProperty("SelectionGridPosition", flags)?.GetValue(grid, null) ??
+			typeof(InventoryGrid).GetMethod("GetSelectedGridPosition", flags, null, System.Type.EmptyTypes, null)?.Invoke(grid, null) ??
+			typeof(InventoryGrid).GetField("m_selected", flags)?.GetValue(grid);
+
+		if (value is Vector2i found)
+		{
+			position = found;
+			return true;
+		}
+
+		if (!warnedNoGamepadSelection)
+		{
+			warnedNoGamepadSelection = true;
+			Logger.LogWarning("Could not read the gamepad selection from InventoryGrid. Gamepad favorites will not work.");
+		}
+
+		return false;
 	}
 
 	// This method reads item data from player inventory instead of UI state.
@@ -336,7 +610,8 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 	private void AddFavoriteBorder(InventoryElement element, bool identityMode = false)
 	{
 		Transform existingBorder = element.transform.Find("QuickStackFavoriteBorder");
-		ColorUtility.TryParseHtmlString(identityMode ? "#1C92D8B3" : "#E2A965B3", out Color borderColor);
+		// Read from config every time so color changes apply without restarting.
+		Color borderColor = identityMode ? itemFavoriteColor.Value : slotFavoriteColor.Value;
 		if (existingBorder != null)
 		{
 			Image existingImage = existingBorder.GetComponent<Image>();
@@ -671,13 +946,13 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		}
 	}
 
-	// Stop Valheim from picking up or moving an item during Alt-left-click.
+	// Stop Valheim from picking up or moving an item during the favorite left-click shortcut.
 	[HarmonyPatch(typeof(InventoryGrid), "OnLeftClick")]
 	private static class InventoryLeftClickPatch
 	{
 		private static bool Prefix()
 		{
-			return !IsAltHeld();
+			return !IsFavoriteMouseActive(0);
 		}
 	}
 
@@ -687,7 +962,7 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 	{
 		private static bool Prefix()
 		{
-			return !IsAltHeld();
+			return !IsFavoriteMouseActive(0);
 		}
 	}
 
@@ -697,17 +972,17 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 	{
 		private static bool Prefix()
 		{
-			return !IsAltHeld();
+			return !IsFavoriteMouseActive(0);
 		}
 	}
 
-	// Stop Valheim from using or consuming an item during Alt-right-click.
+	// Stop Valheim from using or consuming an item during the favorite right-click shortcut.
 	[HarmonyPatch(typeof(InventoryGui), "OnRightClickItem")]
 	private static class InventoryRightClickPatch
 	{
 		private static bool Prefix()
 		{
-			return !IsAltHeld();
+			return !IsFavoriteMouseActive(1);
 		}
 	}
 
@@ -734,9 +1009,436 @@ public sealed class QuickStackPlugin : BaseUnityPlugin
 		return container == openedContainer;
 	}
 
-	// This method centralizes modifier detection for click suppression patches.
-	private static bool IsAltHeld()
+	// True while a favorite shortcut that uses this mouse button (0 = left, 1 = right)
+	// has its modifiers held. The click patches use it to stop the normal inventory action.
+	private static bool IsFavoriteMouseActive(int mouseButton)
 	{
-		return Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+		return IsFavoriteShortcutActive(favoriteItemHotkey, mouseButton) ||
+			IsFavoriteShortcutActive(favoriteSlotHotkey, mouseButton);
+	}
+
+	private static bool IsFavoriteShortcutActive(ConfigEntry<KeyboardShortcut>? entry, int mouseButton)
+	{
+		if (entry == null) return false;
+
+		KeyboardShortcut shortcut = entry.Value;
+		if (shortcut.MainKey != KeyCode.Mouse0 + mouseButton) return false;
+
+		foreach (KeyCode modifier in shortcut.Modifiers)
+		{
+			if (!IsModifierHeld(modifier)) return false;
+		}
+
+		return true;
+	}
+}
+
+// This class reads a gamepad "hold modifier + press button" shortcut.
+// It uses Unity's Input System (the layer the game's own input sits on).
+// Types are accessed by reflection, so the mod needs no reference to Unity.InputSystem.dll.
+internal sealed class GamepadCombo
+{
+	// These names can be used in the config. They map to Input System gamepad controls.
+	internal const string ValidNames =
+		"BumperL, BumperR, TriggerL, TriggerR, StickL, StickR, " +
+		"DPadLeft, DPadRight, DPadUp, DPadDown, " +
+		"ButtonNorth (Y), ButtonSouth (A), ButtonWest (X), ButtonEast (B), " +
+		"Start, Select";
+
+	// Config name -> Input System control path on Gamepad.
+	private static readonly Dictionary<string, string> Aliases =
+		new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+		{
+			{ "BumperL", "leftShoulder" },
+			{ "LeftShoulder", "leftShoulder" },
+			{ "BumperR", "rightShoulder" },
+			{ "RightShoulder", "rightShoulder" },
+			{ "TriggerL", "leftTrigger" },
+			{ "LeftTrigger", "leftTrigger" },
+			{ "TriggerR", "rightTrigger" },
+			{ "RightTrigger", "rightTrigger" },
+			{ "StickL", "leftStickButton" },
+			{ "StickR", "rightStickButton" },
+			{ "DPadLeft", "dpad.left" },
+			{ "DPadRight", "dpad.right" },
+			{ "DPadUp", "dpad.up" },
+			{ "DPadDown", "dpad.down" },
+			{ "ButtonNorth", "buttonNorth" },
+			{ "ButtonY", "buttonNorth" },
+			{ "ButtonSouth", "buttonSouth" },
+			{ "ButtonA", "buttonSouth" },
+			{ "ButtonWest", "buttonWest" },
+			{ "ButtonX", "buttonWest" },
+			{ "ButtonEast", "buttonEast" },
+			{ "ButtonB", "buttonEast" },
+			{ "Start", "startButton" },
+			{ "Select", "selectButton" }
+		};
+
+	// The Input System lookup is shared by every combo.
+	private static PropertyInfo? currentProperty;
+	private static int lookupAttempts;
+	private static bool gaveUp;
+
+	private readonly ConfigEntry<string> modifierEntry;
+	private readonly ConfigEntry<string> buttonEntry;
+	private readonly BepInEx.Logging.ManualLogSource log;
+
+	private string? cachedModifier;
+	private string? cachedButton;
+	private string? modifierPath;
+	private string? buttonPath;
+
+	internal GamepadCombo(
+		ConfigEntry<string> modifier,
+		ConfigEntry<string> button,
+		BepInEx.Logging.ManualLogSource logger)
+	{
+		modifierEntry = modifier;
+		buttonEntry = button;
+		log = logger;
+	}
+
+	// Returns true only on the frame when the button is pressed while the modifier is held.
+	internal bool WasPressed()
+	{
+		if (!EnsureInputSystem())
+		{
+			return false;
+		}
+
+		object? pad = currentProperty!.GetValue(null, null);
+
+		// No gamepad connected.
+		if (pad == null)
+		{
+			return false;
+		}
+
+		Refresh(pad);
+
+		if (buttonPath == null)
+		{
+			return false;
+		}
+
+		if (modifierPath != null)
+		{
+			object? modifier = GetControl(pad, modifierPath);
+			if (modifier == null || !ReadBool(modifier, "isPressed"))
+			{
+				return false;
+			}
+		}
+
+		object? button = GetControl(pad, buttonPath);
+		return button != null && ReadBool(button, "wasPressedThisFrame");
+	}
+
+	// Re-resolves and validates the configured names when the config values change.
+	private void Refresh(object pad)
+	{
+		if (modifierEntry.Value == cachedModifier && buttonEntry.Value == cachedButton)
+		{
+			return;
+		}
+
+		cachedModifier = modifierEntry.Value;
+		cachedButton = buttonEntry.Value;
+
+		modifierPath = ResolveAndValidate(pad, cachedModifier, modifierEntry.Definition.Key);
+		buttonPath = ResolveAndValidate(pad, cachedButton, buttonEntry.Definition.Key);
+	}
+
+	private string? ResolveAndValidate(object pad, string configured, string settingName)
+	{
+		string name = (configured ?? string.Empty).Trim();
+
+		if (name.Length == 0 ||
+			name.Equals("None", System.StringComparison.OrdinalIgnoreCase))
+		{
+			return null;
+		}
+
+		string path = Aliases.TryGetValue(name, out string? alias) ? alias : name;
+
+		if (GetControl(pad, path) == null)
+		{
+			log.LogError(
+				$"Unknown gamepad button '{configured}' for '{settingName}'. " +
+				$"Valid values: {ValidNames}");
+			return null;
+		}
+
+		return path;
+	}
+
+	private static object? GetControl(object pad, string path)
+	{
+		object? current = pad;
+
+		foreach (string part in path.Split('.'))
+		{
+			PropertyInfo? property = current.GetType().GetProperty(
+				part,
+				BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+
+			if (property == null)
+			{
+				return null;
+			}
+
+			current = property.GetValue(current, null);
+
+			if (current == null)
+			{
+				return null;
+			}
+		}
+
+		return current;
+	}
+
+	internal static bool ReadBool(object control, string member)
+	{
+		PropertyInfo? property = control.GetType().GetProperty(
+			member,
+			BindingFlags.Public | BindingFlags.Instance);
+
+		return property != null &&
+			property.GetValue(control, null) is bool value &&
+			value;
+	}
+
+	private bool EnsureInputSystem()
+	{
+		if (currentProperty != null)
+		{
+			return true;
+		}
+
+		if (gaveUp)
+		{
+			return false;
+		}
+
+		System.Type? gamepadType = null;
+
+		try
+		{
+			gamepadType = System.Type.GetType(
+				"UnityEngine.InputSystem.Gamepad, Unity.InputSystem",
+				false);
+
+			if (gamepadType == null)
+			{
+				foreach (Assembly assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+				{
+					gamepadType = assembly.GetType("UnityEngine.InputSystem.Gamepad", false);
+
+					if (gamepadType != null)
+					{
+						break;
+					}
+				}
+			}
+		}
+		catch (System.Exception)
+		{
+			// Try again next frame.
+		}
+
+		currentProperty = gamepadType?.GetProperty(
+			"current",
+			BindingFlags.Public | BindingFlags.Static);
+
+		if (currentProperty != null)
+		{
+			return true;
+		}
+
+		// The assembly may not be loaded yet right after startup.
+		if (++lookupAttempts >= 300)
+		{
+			gaveUp = true;
+			log.LogError("Unity Input System (Gamepad) not found. Gamepad shortcut disabled.");
+		}
+
+		return false;
+	}
+}
+
+// This class reads the keyboard through Unity's Input System (Keyboard.current).
+// It complements Unity's legacy input so shortcuts keep working after switching between
+// keyboard and gamepad. Types are accessed by reflection, so the mod needs no reference
+// to Unity.InputSystem.dll. Mouse buttons are not handled here (legacy input only).
+internal static class KeyboardHotkey
+{
+	internal static BepInEx.Logging.ManualLogSource? Log;
+
+	private static System.Type? keyEnumType;
+	private static PropertyInfo? keyboardCurrentProperty;
+	private static PropertyInfo? keyboardIndexer;
+	private static int lookupAttempts;
+	private static bool gaveUp;
+
+	// KeyCode -> Input System Key value (null when there is no match). Avoids re-parsing every frame.
+	private static readonly Dictionary<KeyCode, object?> keyCache = new Dictionary<KeyCode, object?>();
+
+	internal static bool WasPressedThisFrame(KeyCode code)
+	{
+		return ReadKey(code, "wasPressedThisFrame");
+	}
+
+	internal static bool IsHeld(KeyCode code)
+	{
+		return ReadKey(code, "isPressed");
+	}
+
+	private static bool ReadKey(KeyCode code, string member)
+	{
+		// None and mouse/joystick codes have no keyboard key.
+		if (code == KeyCode.None || code >= KeyCode.Mouse0 || !EnsureKeyboard())
+		{
+			return false;
+		}
+
+		object? keyboard = keyboardCurrentProperty!.GetValue(null, null);
+		if (keyboard == null)
+		{
+			return false;
+		}
+
+		object? key = GetKey(keyboard, code);
+		return key != null && GamepadCombo.ReadBool(key, member);
+	}
+
+	// Converts a Unity KeyCode into the matching Input System Key name.
+	private static string ToKeyName(KeyCode code)
+	{
+		string name = code.ToString();
+
+		if (name.StartsWith("Alpha")) return "Digit" + name.Substring(5);
+		if (name.StartsWith("Keypad")) return "Numpad" + name.Substring(6);
+
+		switch (code)
+		{
+			case KeyCode.LeftControl: return "LeftCtrl";
+			case KeyCode.RightControl: return "RightCtrl";
+			case KeyCode.Return: return "Enter";
+			case KeyCode.Print: return "PrintScreen";
+			case KeyCode.Menu: return "ContextMenu";
+			case KeyCode.LeftApple:
+			case KeyCode.LeftWindows: return "LeftMeta";
+			case KeyCode.RightApple:
+			case KeyCode.RightWindows: return "RightMeta";
+			default: return name;
+		}
+	}
+
+	private static object? GetKey(object keyboard, KeyCode code)
+	{
+		if (keyEnumType == null || keyboardIndexer == null)
+		{
+			return null;
+		}
+
+		if (!keyCache.TryGetValue(code, out object? key))
+		{
+			try
+			{
+				// Ignore case: Unity says BackQuote, the Input System says Backquote.
+				key = System.Enum.Parse(keyEnumType, ToKeyName(code), true);
+			}
+			catch (System.Exception)
+			{
+				// Keys the Input System does not know are ignored.
+				key = null;
+			}
+
+			keyCache[code] = key;
+		}
+
+		if (key == null)
+		{
+			return null;
+		}
+
+		try
+		{
+			return keyboardIndexer.GetValue(keyboard, new object[] { key });
+		}
+		catch (System.Exception)
+		{
+			return null;
+		}
+	}
+
+	private static bool EnsureKeyboard()
+	{
+		if (keyboardCurrentProperty != null && keyboardIndexer != null)
+		{
+			return true;
+		}
+
+		if (gaveUp)
+		{
+			return false;
+		}
+
+		System.Type? keyboardType = FindInputSystemType("UnityEngine.InputSystem.Keyboard");
+		keyEnumType = FindInputSystemType("UnityEngine.InputSystem.Key");
+
+		if (keyboardType != null && keyEnumType != null)
+		{
+			keyboardCurrentProperty = keyboardType.GetProperty(
+				"current",
+				BindingFlags.Public | BindingFlags.Static);
+
+			keyboardIndexer = keyboardType.GetProperty(
+				"Item",
+				new System.Type[] { keyEnumType });
+		}
+
+		if (keyboardCurrentProperty != null && keyboardIndexer != null)
+		{
+			return true;
+		}
+
+		// The assembly may not be loaded yet right after startup.
+		if (++lookupAttempts >= 300)
+		{
+			gaveUp = true;
+			Log?.LogWarning("Input System keyboard not found. Using legacy keyboard input only.");
+		}
+
+		return false;
+	}
+
+	private static System.Type? FindInputSystemType(string fullName)
+	{
+		try
+		{
+			System.Type? type = System.Type.GetType(fullName + ", Unity.InputSystem", false);
+			if (type != null)
+			{
+				return type;
+			}
+
+			foreach (Assembly assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+			{
+				type = assembly.GetType(fullName, false);
+				if (type != null)
+				{
+					return type;
+				}
+			}
+		}
+		catch (System.Exception)
+		{
+			// Try again next frame.
+		}
+
+		return null;
 	}
 }
