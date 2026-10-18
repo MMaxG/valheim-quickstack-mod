@@ -2,6 +2,8 @@
 
 A BepInEx mod for Valheim that quick-stacks matching items from your inventory into nearby containers, with slot/item favoriting to protect items you don't want moved.
 
+[Nexus mods page](https://www.nexusmods.com/valheim/mods/3634)
+
 <img width="800" height="449" alt="quickstackDemo" src="https://github.com/user-attachments/assets/a4eabf57-8ef6-4537-ae83-536343bac4f7" />
 
 ## Features
